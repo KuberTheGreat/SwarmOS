@@ -28,7 +28,7 @@ class SimulationConfig:
     cell_size: int = 40
     tick_rate: int = 60
     robot_step_delay: int = 10
-    window_title: str = "SwarmOS — Phase 1"
+    window_title: str = "SwarmOS — Multi-AMR Simulation"
 
     @property
     def window_width_for(self) -> None:

@@ -7,6 +7,7 @@ SwarmOS is structured around a strict separation of concerns that enables:
 - **Independent robot agents** for decentralised multi-robot coordination
 - **Modular planners** that can be swapped or extended
 - **Clean testing** without GUI dependencies
+- **Conflict detection** separate from conflict resolution
 
 ---
 
@@ -20,17 +21,31 @@ graph TD
 
     ML --> Grid[Grid]
     ML --> ScenarioData
+    ML --> RobotSpec
 
     Engine --> Grid
-    Engine --> AMR
+    Engine --> Fleet
     Engine --> Config[SimulationConfig]
+    Engine --> Metrics[SimulationMetrics]
+    Engine --> Detector[Conflict Detector]
 
-    AMR --> Planner[A* Planner]
-    AMR --> PathObj[Path]
-    AMR --> State[RobotState]
+    Fleet --> AMR1[AMR-01]
+    Fleet --> AMR2[AMR-02]
+    Fleet --> AMR3[AMR-03]
 
+    AMR1 --> Planner[A* Planner]
+    AMR2 --> Planner
+    AMR3 --> Planner
+
+    Planner --> PathObj[Path]
     Planner --> Grid
-    Planner --> PathObj
+
+    AMR1 --> State[RobotState]
+    AMR2 --> State
+    AMR3 --> State
+
+    Detector --> ConflictModel["Conflict / Collision"]
+    Detector --> Fleet
 
     Renderer --> Engine
 
@@ -38,7 +53,9 @@ graph TD
     style Engine fill:#1a3a5c,color:#fff
     style Planner fill:#5c3a1a,color:#fff
     style Grid fill:#3a1a5c,color:#fff
-    style AMR fill:#5c1a3a,color:#fff
+    style Fleet fill:#5c1a3a,color:#fff
+    style Detector fill:#5c5c1a,color:#fff
+    style Metrics fill:#1a5c5c,color:#fff
 ```
 
 ### `warehouse/` — Environment Model
@@ -47,7 +64,7 @@ graph TD
 |--------|---------------|
 | `cell.py` | `Position` (immutable coordinate) and `CellType` (extensible enum) |
 | `grid.py` | 2D grid: bounds checking, traversability, neighbour queries |
-| `map_loader.py` | Parses scenario JSON → `Grid` + robot start/goal |
+| `map_loader.py` | Parses scenario JSON → `Grid` + list of `RobotSpec` (supports both Phase 1 and Phase 2 formats) |
 
 **Design rule**: The warehouse answers environmental questions ("Is this cell traversable?"). It never decides *where* a robot should go.
 
@@ -66,59 +83,84 @@ graph TD
 |--------|---------------|
 | `amr.py` | AMR class: owns its position, state, path. Uses the planner. |
 | `state.py` | `RobotState` enum (IDLE → MOVING → ARRIVED) |
+| `fleet.py` | Fleet: ordered collection of AMRs with unique IDs. State container, not a controller. |
 
-**Design rule**: Each AMR is an independent agent. It *uses* a planner but doesn't *contain* planning logic. This prepares for the future decentralised architecture where each robot has its own local world model and decision loop.
+**Design rule**: Each AMR is an independent agent. The Fleet holds them but doesn't direct them. This prepares for the decentralised architecture where each robot owns its own decision-making.
+
+### `coordination/` — Conflict Detection *(Phase 2)*
+
+| Module | Responsibility |
+|--------|---------------|
+| `conflict.py` | Data models: `Conflict` (path overlap), `Collision` (runtime overlap), `ConflictType` enum |
+| `detector.py` | Static path conflict detection (node + edge) and runtime collision detection |
+
+**Design rule**: Detection ≠ Resolution. This module *reports* problems. Future phases will add resolution protocols in separate modules.
 
 ### `simulation/` — Engine
 
 | Module | Responsibility |
 |--------|---------------|
-| `engine.py` | Discrete-tick simulation loop. Manages grid + robots + time. |
+| `engine.py` | Discrete-tick simulation loop. Manages grid + fleet + time + metrics. |
 | `config.py` | Immutable configuration (cell size, tick rate, step delay) |
+| `metrics.py` | Per-robot and aggregate metrics (steps, arrivals, collisions, conflicts) |
 
-**Design rule**: The engine is headless-capable. It never imports Pygame. This is critical for running thousands of benchmark simulations without a display.
+**Design rule**: The engine is headless-capable. It never imports Pygame. It orchestrates *time*, not *decisions*.
 
 ### `visualization/` — Rendering
 
 | Module | Responsibility |
 |--------|---------------|
-| `renderer.py` | Pygame renderer. Reads engine state, draws it. Never mutates simulation state. |
+| `renderer.py` | Pygame renderer. Draws all robots with distinct colours, paths, goals, IDs, and legend. |
 
-**Design rule**: The renderer is a pure *observer*. It can be removed entirely without affecting simulation correctness.
+**Design rule**: The renderer is a pure *observer*. It can be removed without affecting simulation correctness.
 
 ---
 
-## Data Flow
+## Multi-AMR Data Flow
 
 ```mermaid
 sequenceDiagram
     participant CLI
     participant Loader as MapLoader
+    participant Fleet
     participant Engine
-    participant AMR
+    participant AMR1 as AMR-01
+    participant AMR2 as AMR-02
     participant Planner as A*
+    participant Detector
     participant Renderer
 
-    CLI->>Loader: load_scenario("basic_warehouse.json")
-    Loader-->>CLI: ScenarioData (grid, start, goal)
+    CLI->>Loader: load_scenario("multi_robot.json")
+    Loader-->>CLI: ScenarioData (grid, robot_specs[])
 
-    CLI->>AMR: AMR(id, start_position)
-    CLI->>Engine: SimulationEngine(grid, robot, config)
+    CLI->>Fleet: Fleet()
+    loop For each RobotSpec
+        CLI->>Fleet: add(AMR(id, start))
+    end
 
-    CLI->>Engine: plan_robot(goal)
-    Engine->>AMR: plan(grid, goal)
-    AMR->>Planner: find_path(grid, start, goal)
-    Planner-->>AMR: Path (waypoints)
+    CLI->>Engine: SimulationEngine(grid, fleet, config)
+    CLI->>Engine: plan_all(goals)
+    Engine->>AMR1: plan(grid, goal)
+    AMR1->>Planner: find_path(grid, start, goal)
+    Planner-->>AMR1: Path
+    Engine->>AMR2: plan(grid, goal)
+    AMR2->>Planner: find_path(grid, start, goal)
+    Planner-->>AMR2: Path
+
+    CLI->>Engine: detect_initial_conflicts()
+    Engine->>Detector: detect_path_conflicts(fleet)
+    Detector-->>Engine: list[Conflict]
 
     CLI->>Renderer: Renderer(engine)
 
     loop Every Frame
         CLI->>Renderer: handle_events()
         CLI->>Engine: update()
-        Engine->>AMR: step()
-        AMR->>AMR: advance along path
+        Engine->>AMR1: step()
+        Engine->>AMR2: step()
+        Engine->>Detector: detect_collisions(fleet, tick)
+        Detector-->>Engine: list[Collision]
         CLI->>Renderer: render()
-        Renderer->>Engine: read state
         CLI->>Renderer: tick()
     end
 ```
@@ -131,36 +173,83 @@ sequenceDiagram
 INITIALIZE CLI + parse args
          │
          ▼
-    LOAD SCENARIO (JSON → Grid + start/goal)
+    LOAD SCENARIO (JSON → Grid + RobotSpecs)
          │
          ▼
-    CREATE AMR (id, start position)
+    CREATE FLEET (add AMR for each spec)
          │
          ▼
-    CREATE ENGINE (grid, robot, config)
+    CREATE ENGINE (grid, fleet, config)
          │
          ▼
-    PLAN PATH (AMR calls A* → Path)
+    PLAN ALL PATHS (each AMR calls A* independently)
          │
          ▼
-  ┌─── RUN LOOP ◄──────────────────┐
-  │      │                          │
-  │      ▼                          │
-  │  HANDLE EVENTS (quit?)          │
-  │      │                          │
-  │      ▼                          │
-  │  UPDATE ENGINE (tick + step)    │
-  │      │                          │
-  │      ▼                          │
-  │  RENDER (draw state)            │
-  │      │                          │
-  │      ▼                          │
-  │  GOAL REACHED? ─── No ─────────┘
+    DETECT INITIAL PATH CONFLICTS (static analysis)
+         │
+         ▼
+  ┌─── RUN LOOP ◄──────────────────────────┐
+  │      │                                   │
+  │      ▼                                   │
+  │  HANDLE EVENTS (quit?)                   │
+  │      │                                   │
+  │      ▼                                   │
+  │  UPDATE ENGINE                           │
+  │    ├── step ALL robots (insertion order)  │
+  │    ├── detect collisions                 │
+  │    └── record metrics                    │
+  │      │                                   │
+  │      ▼                                   │
+  │  RENDER (draw all robots, paths, legend) │
+  │      │                                   │
+  │      ▼                                   │
+  │  ALL ARRIVED? ─── No ───────────────────┘
   │      │
   │     Yes
   │      │
-  └──── END
+  └──── PRINT METRICS + END
 ```
+
+---
+
+## Conflict Detection Model
+
+### Key Distinction
+
+| Concept | When | How |
+|---------|------|-----|
+| **Path Conflict** | Before/during execution | Static analysis of planned trajectories |
+| **Collision** | During execution | Runtime position comparison |
+
+### Conflict Types
+
+```mermaid
+flowchart LR
+    subgraph "NODE Conflict"
+        A1["AMR-01 at (5,5) t=3"]
+        A2["AMR-02 at (5,5) t=3"]
+        A1 -.->|"same cell, same time"| A2
+    end
+
+    subgraph "EDGE Conflict"
+        B1["AMR-01: (3,0)→(4,0) t=2→3"]
+        B2["AMR-02: (4,0)→(3,0) t=2→3"]
+        B1 -.->|"swap positions"| B2
+    end
+```
+
+### Temporal Model
+
+Paths are treated as timed trajectories where the waypoint index = discrete timestep:
+
+```
+AMR-01: t=0:(1,1) → t=1:(2,1) → t=2:(3,1) → t=3:(4,1) → ...
+AMR-02: t=0:(7,1) → t=1:(6,1) → t=2:(5,1) → t=3:(4,1) → ...
+                                                    ↑
+                                            NODE conflict at t=3
+```
+
+After a robot's path ends, it stays at its final position (clamped).
 
 ---
 
@@ -190,19 +279,17 @@ flowchart TD
 
 ## Future Extension Points
 
-The Phase 1 architecture is designed so these additions are natural, not refactors:
-
 | Future Feature | Extension Point |
 |---------------|----------------|
-| Multiple robots | Engine holds `list[AMR]`; update loop iterates all |
+| Conflict resolution | Add `coordination/resolver.py` — responds to detected Conflicts |
 | New cell types | Add variants to `CellType` enum |
 | Re-planning | AMR calls `plan()` again with updated grid state |
 | Local world model | AMR stores its own `Grid` copy, updated via sensors |
 | Peer communication | Add `CommunicationChannel` injected into each AMR |
-| Conflict resolution | AMR checks reservations before `step()` |
-| Battery/velocity | Add fields to AMR (slots already extensible) |
-| New planners | Create `planning/dijkstra.py`, same interface |
-| Benchmarking | Use `--headless` mode, run many scenarios |
+| Battery/velocity | Add fields to AMR |
+| New planners | Create `planning/dijkstra.py`, same `find_path()` interface |
+| Benchmarking | Use `--headless` mode, compare metrics across strategies |
+| Stop-and-wait baseline | Add `coordination/stop_and_wait.py` — pause on conflict |
 | Dashboard | Read-only observer, same as Renderer pattern |
 
 ### Future Robot Architecture (Decentralised)
@@ -222,7 +309,10 @@ No central `FleetController`. The simulation engine orchestrates *time* (ticks),
 
 ## Testing Strategy
 
-- Tests depend only on domain modules (`warehouse`, `planning`, `robot`)
+- **105 tests** across 7 test files
+- Tests depend only on domain modules (`warehouse`, `planning`, `robot`, `coordination`, `simulation`)
 - Tests never import Pygame
 - Tests verify **behaviour**, not implementation details
-- All pathfinding edge cases are covered: unreachable goals, invalid positions, obstacles, trivial paths
+- All pathfinding edge cases are covered
+- Conflict detection validated with temporal awareness
+- Phase 1 backward compatibility verified in scenario tests
