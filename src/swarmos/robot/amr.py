@@ -1,0 +1,138 @@
+"""Autonomous Mobile Robot (AMR) model.
+
+The AMR is an *independent agent* — it owns its own state and consumes
+a planner to decide how to move.  In Phase 1 the robot is given a goal,
+plans once via A*, and executes that path.  The class is structured so
+that future phases can add:
+
+* local world model
+* peer communication
+* re-planning on conflict
+* battery / velocity / sensor state
+
+without rewriting the core robot interface.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from swarmos.planning.astar import find_path
+from swarmos.planning.path import Path
+from swarmos.robot.state import RobotState
+from swarmos.warehouse.cell import Position
+
+if TYPE_CHECKING:
+    from swarmos.warehouse.grid import Grid
+
+
+class AMR:
+    """A single autonomous mobile robot operating on a warehouse grid.
+
+    Parameters:
+        robot_id: Unique identifier string.
+        position: Initial grid position.
+    """
+
+    __slots__ = (
+        "_robot_id",
+        "_position",
+        "_goal",
+        "_path",
+        "_state",
+    )
+
+    def __init__(self, robot_id: str, position: Position) -> None:
+        self._robot_id = robot_id
+        self._position = position
+        self._goal: Position | None = None
+        self._path: Path | None = None
+        self._state = RobotState.IDLE
+
+    # ------------------------------------------------------------------
+    # Properties (read-only public interface)
+    # ------------------------------------------------------------------
+
+    @property
+    def robot_id(self) -> str:
+        return self._robot_id
+
+    @property
+    def position(self) -> Position:
+        return self._position
+
+    @property
+    def goal(self) -> Position | None:
+        return self._goal
+
+    @property
+    def path(self) -> Path | None:
+        return self._path
+
+    @property
+    def state(self) -> RobotState:
+        return self._state
+
+    @property
+    def has_reached_goal(self) -> bool:
+        return self._state is RobotState.ARRIVED
+
+    # ------------------------------------------------------------------
+    # Planning
+    # ------------------------------------------------------------------
+
+    def plan(self, grid: Grid, goal: Position) -> bool:
+        """Compute a path to *goal* using A* and transition to MOVING.
+
+        Returns ``True`` if a valid path was found, ``False`` otherwise.
+        On failure the robot remains IDLE.
+        """
+        self._goal = goal
+        result = find_path(grid, self._position, goal)
+
+        if result is None:
+            self._path = None
+            self._state = RobotState.IDLE
+            return False
+
+        self._path = result
+
+        # If start == goal the path has length 1 — already there.
+        if result.is_complete:
+            self._state = RobotState.ARRIVED
+        else:
+            self._state = RobotState.MOVING
+
+        return True
+
+    # ------------------------------------------------------------------
+    # Execution
+    # ------------------------------------------------------------------
+
+    def step(self) -> None:
+        """Advance the robot by one waypoint along its planned path.
+
+        Does nothing if the robot is not in the MOVING state.
+        """
+        if self._state is not RobotState.MOVING:
+            return
+
+        if self._path is None:
+            return
+
+        next_pos = self._path.advance()
+        if next_pos is not None:
+            self._position = next_pos
+
+        if self._path.is_complete:
+            self._state = RobotState.ARRIVED
+
+    # ------------------------------------------------------------------
+    # Representation
+    # ------------------------------------------------------------------
+
+    def __repr__(self) -> str:
+        return (
+            f"AMR(id={self._robot_id!r}, pos={self._position}, "
+            f"state={self._state.name})"
+        )
