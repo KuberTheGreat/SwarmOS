@@ -2,7 +2,7 @@
 
 Provides the ``swarmos`` console command and the ``python -m swarmos``
 entry point.  Supports both single-robot (Phase 1) and multi-robot
-(Phase 2) scenarios.
+(Phase 2) scenarios, with optional coordination policies (Phase 3+).
 """
 
 from __future__ import annotations
@@ -48,6 +48,13 @@ def main(argv: list[str] | None = None) -> None:
         default=10,
         help="Ticks between each robot movement step (default: 10)",
     )
+    parser.add_argument(
+        "--policy",
+        type=str,
+        choices=["none", "stop_and_wait"],
+        default="none",
+        help="Coordination policy: 'none' (Phase 1/2) or 'stop_and_wait' (Phase 3)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -74,13 +81,27 @@ def main(argv: list[str] | None = None) -> None:
         fleet.add(robot)
         goals[spec.robot_id] = spec.goal
 
+    # --- Instantiate coordination policy ---
+    policy = None
+    if args.policy == "stop_and_wait":
+        from swarmos.coordination.policy import StopAndWaitPolicy
+        policy = StopAndWaitPolicy()
+        print(f"[SwarmOS] Policy: {policy.name}")
+    else:
+        print("[SwarmOS] Policy: NONE (no collision avoidance)")
+
     # --- Build simulation ---
     config = SimulationConfig(
         cell_size=args.cell_size,
         tick_rate=args.tick_rate,
         robot_step_delay=args.step_delay,
     )
-    engine = SimulationEngine(grid=scenario.grid, robots=fleet, config=config)
+    engine = SimulationEngine(
+        grid=scenario.grid,
+        robots=fleet,
+        config=config,
+        policy=policy,
+    )
 
     # --- Plan paths ---
     results = engine.plan_all(goals)
@@ -156,3 +177,4 @@ def _run_visual(engine: SimulationEngine) -> None:
 
 if __name__ == "__main__":
     main()
+

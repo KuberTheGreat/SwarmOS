@@ -11,6 +11,11 @@ Phase 2 additions:
     - Status bar with fleet-level information
     - Metrics overlay
 
+Phase 3 additions:
+    - WAITING state visual indicator (orange/yellow pulsing ring)
+    - Wait tick counter in status bar
+    - WAITING state in legend
+
 Colour palette (designed for clarity, not flash):
     Background grid  — dark charcoal
     Grid lines       — subtle grey
@@ -20,10 +25,12 @@ Colour palette (designed for clarity, not flash):
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import pygame
 
+from swarmos.robot.state import RobotState
 from swarmos.warehouse.cell import CellType, Position
 
 if TYPE_CHECKING:
@@ -38,6 +45,7 @@ _COL_GRID_LINE   = (50, 50, 58)
 _COL_OBSTACLE    = (120, 80, 50)
 _COL_TEXT         = (220, 220, 220)
 _COL_COLLISION    = (255, 60, 60)
+_COL_WAITING      = (255, 180, 40)   # orange-yellow for WAITING indicator
 
 # Per-robot colour palette — visually distinct, colourblind-considerate.
 _ROBOT_COLOURS: list[tuple[int, int, int]] = [
@@ -112,6 +120,9 @@ class Renderer:
             surf.fill((*color, _PATH_ALPHA))
             self._path_surfaces[robot_id] = surf
 
+        # Frame counter for pulsing animations.
+        self._frame_count: int = 0
+
     # ------------------------------------------------------------------
     # Coordinate helpers
     # ------------------------------------------------------------------
@@ -183,9 +194,13 @@ class Renderer:
             pygame.draw.polygon(self._screen, (255, 255, 255), points, 1)
 
     def _draw_robots(self) -> None:
-        """Draw all robots as filled circles with ID labels."""
+        """Draw all robots as filled circles with ID labels.
+
+        WAITING robots get a pulsing orange ring and a "WAIT" indicator.
+        """
         for robot in self._engine.fleet:
             color = self._robot_colors.get(robot.robot_id, (0, 200, 180))
+            is_waiting = robot.state is RobotState.WAITING
             if robot.has_reached_goal:
                 color = _brighten(color)
 
@@ -194,6 +209,19 @@ class Renderer:
             pygame.draw.circle(self._screen, color, (cx, cy), radius)
             # White outline
             pygame.draw.circle(self._screen, (255, 255, 255), (cx, cy), radius, 1)
+
+            # --- WAITING indicator ---
+            if is_waiting:
+                # Pulsing ring — radius oscillates with a sine wave.
+                pulse = 2 + int(2 * math.sin(self._frame_count * 0.15))
+                ring_radius = radius + 3 + pulse
+                pygame.draw.circle(
+                    self._screen, _COL_WAITING, (cx, cy), ring_radius, 2
+                )
+                # "WAIT" label below the robot
+                wait_label = self._font_id.render("WAIT", True, _COL_WAITING)
+                wait_rect = wait_label.get_rect(center=(cx, cy + radius + 12))
+                self._screen.blit(wait_label, wait_rect)
 
             # Draw robot ID label
             label = self._font_id.render(robot.robot_id, True, (255, 255, 255))
@@ -207,11 +235,13 @@ class Renderer:
         total = len(fleet)
         collisions = self._engine.metrics.total_collisions
         conflicts = self._engine.metrics.total_path_conflicts
+        waits = self._engine.metrics.total_wait_ticks
         status = (
             f"Tick: {self._engine.tick}  |  "
             f"Robots: {arrived}/{total} arrived  |  "
             f"Conflicts: {conflicts}  |  "
-            f"Collisions: {collisions}"
+            f"Collisions: {collisions}  |  "
+            f"Waits: {waits}"
         )
         surface = self._font.render(status, True, _COL_TEXT)
         # Draw background bar for readability
@@ -234,6 +264,10 @@ class Renderer:
             pygame.draw.circle(self._screen, color, (x + 6, y_start + 8), 5)
             pygame.draw.circle(self._screen, (255, 255, 255), (x + 6, y_start + 8), 5, 1)
 
+            # Waiting indicator in legend swatch
+            if robot.state is RobotState.WAITING:
+                pygame.draw.circle(self._screen, _COL_WAITING, (x + 6, y_start + 8), 7, 1)
+
             # Label
             state_text = robot.state.name
             label = f"{robot.robot_id}: ({robot.position.x},{robot.position.y}) {state_text}"
@@ -248,6 +282,7 @@ class Renderer:
 
     def render(self) -> None:
         """Draw the current simulation state to the screen."""
+        self._frame_count += 1
         self._screen.fill(_COL_BACKGROUND)
         self._draw_grid()
         self._draw_obstacles()
@@ -275,3 +310,4 @@ class Renderer:
     def shutdown(self) -> None:
         """Clean up Pygame resources."""
         pygame.quit()
+

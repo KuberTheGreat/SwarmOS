@@ -1,1 +1,1 @@
-"""Coordination — conflict detection and collision tracking."""
+"""Coordination — conflict detection, collision tracking, and policies."""

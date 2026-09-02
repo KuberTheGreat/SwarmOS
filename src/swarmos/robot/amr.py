@@ -11,6 +11,11 @@ that future phases can add:
 * battery / velocity / sensor state
 
 without rewriting the core robot interface.
+
+Phase 3 additions:
+    wait()                   — transition to WAITING (stop-and-wait policy)
+    resume()                 — transition from WAITING back to MOVING
+    intended_next_position   — where the robot *wants* to go next
 """
 
 from __future__ import annotations
@@ -77,6 +82,21 @@ class AMR:
     def has_reached_goal(self) -> bool:
         return self._state is RobotState.ARRIVED
 
+    @property
+    def intended_next_position(self) -> Position:
+        """Return the position this robot *wants* to move to next.
+
+        If the robot is MOVING (or WAITING) and has remaining waypoints,
+        returns the next waypoint.  Otherwise returns the current
+        position (the robot intends to stay put).
+        """
+        if self._state in (RobotState.MOVING, RobotState.WAITING):
+            if self._path is not None:
+                nxt = self._path.peek_next()
+                if nxt is not None:
+                    return nxt
+        return self._position
+
     # ------------------------------------------------------------------
     # Planning
     # ------------------------------------------------------------------
@@ -127,6 +147,24 @@ class AMR:
         if self._path.is_complete:
             self._state = RobotState.ARRIVED
 
+    def wait(self) -> None:
+        """Transition to WAITING — the robot yields for this tick.
+
+        Only meaningful when the robot is MOVING or WAITING.
+        Does nothing for IDLE or ARRIVED robots.
+        """
+        if self._state in (RobotState.MOVING, RobotState.WAITING):
+            self._state = RobotState.WAITING
+
+    def resume(self) -> None:
+        """Transition from WAITING back to MOVING.
+
+        Only meaningful when the robot is WAITING.
+        Does nothing for other states.
+        """
+        if self._state is RobotState.WAITING:
+            self._state = RobotState.MOVING
+
     # ------------------------------------------------------------------
     # Representation
     # ------------------------------------------------------------------
@@ -136,3 +174,4 @@ class AMR:
             f"AMR(id={self._robot_id!r}, pos={self._position}, "
             f"state={self._state.name})"
         )
+

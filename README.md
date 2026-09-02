@@ -18,6 +18,12 @@ A single autonomous mobile robot navigates a 2D warehouse grid from a configurab
 
 Multiple independent AMRs navigate simultaneously on the same warehouse grid. Path conflicts and runtime collisions are detected and measured.
 
+### Phase 3 — Stop-and-Wait Baseline ✅
+
+A deliberately naive stop-and-wait collision avoidance policy. This baseline exists to establish measurable comparison data for future decentralized coordination algorithms.
+
+**Research question:** *Can decentralized coordination reduce total task completion time compared with naive stop-and-wait behavior?*
+
 **What works:**
 - 2D grid-based warehouse with static obstacles
 - A* pathfinding with Manhattan distance heuristic
@@ -25,20 +31,34 @@ Multiple independent AMRs navigate simultaneously on the same warehouse grid. Pa
 - Fleet container for managing robot collections
 - Path conflict detection (node + edge conflicts, temporal)
 - Runtime collision detection
+- **Stop-and-wait coordination policy** (pluggable via `--policy`)
+  - Node conflict resolution (same-cell targets → lower ID moves)
+  - Edge conflict detection (head-on swap → both wait)
+  - Occupancy conflict detection (cell blocked → wait)
+  - Deterministic tie-breaking (lower robot ID wins)
+  - Snapshot-based simultaneous updates (iteration-order independent)
+  - WAITING robot state with visual indicator
+- **Wait and movement metrics tracking** (per-robot and aggregate)
 - Simulation metrics (per-robot and aggregate)
-- Real-time Pygame visualisation with distinct robot colours, ID labels, path overlays, and legend
+- Real-time Pygame visualisation with distinct robot colours, ID labels, path overlays, waiting indicators, and legend
 - Headless simulation mode for benchmarking
 - JSON-based multi-robot scenario configuration
+- **4 baseline benchmark scenarios** (crossing, intersection, chokepoint, head-on)
 - Backward compatibility with Phase 1 single-robot scenarios
-- 105 unit tests
+- 153 unit and integration tests
 
-**What is intentionally NOT implemented yet:**
-- Conflict **resolution** (detection only)
-- P2P communication between robots
-- Reservation/negotiation protocols
+**What is intentionally NOT implemented (by design):**
+- Priority negotiation
+- Reservation/communication protocols
 - Dynamic rerouting
+- Deadlock resolution (beyond simple tie-breaking)
 - Task allocation
-- Centralized fleet controller (by design — this is a decentralized system)
+- Centralized fleet controller (this is a decentralized system)
+
+**Known limitations (by design — this is a baseline):**
+- Head-on conflicts in corridors result in deadlock (no rerouting)
+- No dynamic path adaptation
+- Edge conflicts require both robots to wait (no swap resolution)
 
 ---
 
@@ -49,7 +69,7 @@ swarmos/
 ├── warehouse/       # Environment model (Grid, Cell, Position)
 ├── planning/        # Pathfinding algorithms (A*, Path)
 ├── robot/           # AMR model, state machine, Fleet container
-├── coordination/    # Conflict detection, collision detection
+├── coordination/    # Conflict detection, collision detection, policies
 ├── simulation/      # Engine (headless-capable), config, metrics
 ├── visualization/   # Pygame renderer (read-only view of state)
 └── cli.py           # Entry point and argument parsing
@@ -60,8 +80,9 @@ swarmos/
 - **Planner ≠ Robot**: A* is a standalone module; robots consume it
 - **Environment ≠ Agent**: Grid answers spatial queries; doesn't decide movement
 - **Each robot is an independent agent**: No centralized fleet controller
-- **Detection ≠ Resolution**: Conflicts are detected, not automatically resolved
+- **Detection ≠ Resolution**: Conflicts are detected and resolved via pluggable policies
 - **Fleet ≠ Controller**: Fleet is a state container, not a decision-maker
+- **Policy ≠ Controller**: Policies are strategies applied to snapshots, not centralized decision-makers
 
 See [`docs/architecture.md`](docs/architecture.md) for detailed documentation.
 
@@ -72,7 +93,7 @@ See [`docs/architecture.md`](docs/architecture.md) for detailed documentation.
 ### Prerequisites
 
 - Python 3.11+
-- macOS or Linux (Windows: use `.\\.venv\\Scripts\\activate` instead of `source`)
+- macOS or Linux (Windows: use `.\\\.venv\\\Scripts\\\activate` instead of `source`)
 
 ### Setup
 
@@ -87,17 +108,23 @@ pip install -e ".[dev]"
 ### Run the Simulation
 
 ```bash
-# Multi-robot simulation (Pygame window)
+# Multi-robot with stop-and-wait collision avoidance (Phase 3)
+python -m swarmos --scenario scenarios/baseline_crossing.json --policy stop_and_wait
+
+# Without policy (Phase 2 behavior — no collision avoidance)
 python -m swarmos --scenario scenarios/multi_robot.json
 
-# Crossing robots scenario (path conflicts guaranteed)
-python -m swarmos --scenario scenarios/crossing_robots.json
+# Baseline scenarios with policy
+python -m swarmos --scenario scenarios/baseline_crossing.json --policy stop_and_wait
+python -m swarmos --scenario scenarios/baseline_intersection.json --policy stop_and_wait
+python -m swarmos --scenario scenarios/baseline_chokepoint.json --policy stop_and_wait
+python -m swarmos --scenario scenarios/baseline_headon.json --policy stop_and_wait
+
+# Headless benchmarking with policy
+python -m swarmos --scenario scenarios/baseline_crossing.json --headless --policy stop_and_wait --step-delay 1
 
 # Single robot (Phase 1 backward compat)
 python -m swarmos --scenario scenarios/basic_warehouse.json
-
-# Headless (no GUI — for benchmarking)
-python -m swarmos --scenario scenarios/multi_robot.json --headless
 
 # Adjust visualisation
 python -m swarmos --scenario scenarios/multi_robot.json --cell-size 30 --step-delay 5
@@ -118,7 +145,7 @@ pytest --tb=short  # shorter tracebacks
 
 ## Scenario Format
 
-### Multi-Robot (Phase 2)
+### Multi-Robot (Phase 2+)
 
 ```json
 {
@@ -154,7 +181,7 @@ The loader validates:
 
 ---
 
-## Conflict Detection
+## Conflict Detection & Resolution
 
 SwarmOS distinguishes between **path conflicts** (static analysis of planned trajectories) and **collisions** (runtime same-cell occupancy).
 
@@ -169,19 +196,43 @@ SwarmOS distinguishes between **path conflicts** (static analysis of planned tra
 
 Detected each simulation tick when two robots actually occupy the same cell.
 
+### Coordination Policy (Phase 3)
+
+The `--policy stop_and_wait` flag enables the stop-and-wait baseline:
+- **Node conflicts**: Lower robot ID moves, higher waits
+- **Edge conflicts**: Both robots wait (swap is unsafe without rerouting)
+- **Occupancy conflicts**: Robot waits if target cell is occupied by a non-moving robot
+- **Deterministic**: Same scenario always produces identical results
+- **No centralized controller**: Policy is a strategy applied to snapshots
+
 ### Example Output
 
 ```
-[SwarmOS] ⚠ 2 path conflict(s) detected:
-  Conflict(EDGE, 'AMR-01' ↔ 'AMR-02', pos=Position(x=10, y=5), t=12)
-  Conflict(NODE, 'AMR-01' ↔ 'AMR-03', pos=Position(x=11, y=7), t=16)
-
 ═══ Simulation Metrics ═══
-  Total ticks:          290
+  Policy:               STOP_AND_WAIT
+  Total ticks:          11
   Robots:               3/3 completed
+  Total movements:      27
+  Total wait ticks:     3
   Path conflicts:       2
-  Runtime collisions:   1
+  Runtime collisions:   0
+      AMR-01: path=10, steps=9, waits=0, arrived at tick 9
+      AMR-02: path=10, steps=9, waits=1, arrived at tick 10
+      AMR-03: path=10, steps=9, waits=2, arrived at tick 11
 ```
+
+---
+
+## Baseline Scenarios (Phase 3)
+
+| Scenario | Robots | Description | Expected Outcome |
+|----------|--------|-------------|-----------------|
+| `baseline_crossing.json` | 3 | Paths cross at center of open grid | All arrive, some waits |
+| `baseline_intersection.json` | 4 | 4-way intersection through corridors | Deadlock (expected) |
+| `baseline_chokepoint.json` | 4 | 1-cell-wide corridor, bidirectional | Deadlock (expected) |
+| `baseline_headon.json` | 2 | Head-on in 1-cell corridor | Deadlock (expected) |
+
+Deadlocks are **expected** and **by design** — they demonstrate the limitation of naive stop-and-wait without rerouting. Future phases will resolve these through decentralized coordination.
 
 ---
 
@@ -191,7 +242,7 @@ Detected each simulation tick when two robots actually occupy the same cell.
 |-------|-------------|--------|
 | 1 | Single AMR navigation (A* on grid) | ✅ |
 | 2 | Multi-AMR simulation + conflict detection | ✅ |
-| 3 | Stop-and-wait collision baseline | ⬜ |
+| 3 | Stop-and-wait collision baseline | ✅ |
 | 4 | Peer-to-peer communication | ⬜ |
 | 5 | Distributed conflict detection | ⬜ |
 | 6 | Reservation / negotiation protocol | ⬜ |
@@ -209,3 +260,4 @@ Detected each simulation tick when two robots actually occupy the same cell.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+

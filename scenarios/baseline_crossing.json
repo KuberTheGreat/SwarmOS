@@ -1,0 +1,22 @@
+{
+  "width": 10,
+  "height": 10,
+  "obstacles": [],
+  "robots": [
+    {
+      "id": "AMR-01",
+      "start": [0, 5],
+      "goal": [9, 5]
+    },
+    {
+      "id": "AMR-02",
+      "start": [5, 0],
+      "goal": [5, 9]
+    },
+    {
+      "id": "AMR-03",
+      "start": [9, 4],
+      "goal": [0, 4]
+    }
+  ]
+}

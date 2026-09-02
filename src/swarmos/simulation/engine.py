@@ -12,22 +12,35 @@ It does **not** know about rendering.  This separation is critical:
 it lets us later run thousands of headless benchmark simulations
 without importing Pygame.
 
-DESIGN NOTE on update ordering:
-    All robots are stepped simultaneously within a single tick.
-    The step order is deterministic (fleet insertion order), but
-    robot B's movement does NOT depend on robot A's movement within
-    the same tick.  This avoids accidental centralized priority.
+DESIGN NOTE on update ordering (Phase 3):
+    When a CoordinationPolicy is active, the engine uses snapshot-based
+    simultaneous updates:
+      1. Build a snapshot of every robot's state and intended next move.
+      2. Pass the snapshot list to the policy's decide() method.
+      3. Apply only approved movements — robots told to WAIT stay put.
+      4. Record metrics (moves, waits, arrivals, collisions).
+    This ensures that iteration order does NOT affect the outcome.
+
+    When no policy is set (Phase 1/2 backward compatibility), all
+    robots step unconditionally in insertion order.
 """
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+from swarmos.coordination.decision import Decision, RobotSnapshot
 from swarmos.coordination.detector import detect_collisions, detect_path_conflicts
 from swarmos.robot.amr import AMR
 from swarmos.robot.fleet import Fleet
+from swarmos.robot.state import RobotState
 from swarmos.simulation.config import SimulationConfig
 from swarmos.simulation.metrics import SimulationMetrics
 from swarmos.warehouse.cell import Position
 from swarmos.warehouse.grid import Grid
+
+if TYPE_CHECKING:
+    from swarmos.coordination.policy import CoordinationPolicy
 
 
 class SimulationEngine:
@@ -37,10 +50,12 @@ class SimulationEngine:
         grid:   The warehouse grid.
         robots: Either a single AMR (Phase 1 compat) or a Fleet.
         config: Engine configuration.
+        policy: Optional coordination policy (Phase 3+).
     """
 
     __slots__ = (
-        "_grid", "_fleet", "_config", "_tick", "_finished", "_metrics",
+        "_grid", "_fleet", "_config", "_tick", "_finished",
+        "_metrics", "_policy", "_max_ticks",
     )
 
     def __init__(
@@ -48,6 +63,8 @@ class SimulationEngine:
         grid: Grid,
         robots: AMR | Fleet,
         config: SimulationConfig | None = None,
+        policy: CoordinationPolicy | None = None,
+        max_ticks: int = 50_000,
     ) -> None:
         self._grid = grid
 
@@ -62,6 +79,11 @@ class SimulationEngine:
         self._tick: int = 0
         self._finished: bool = False
         self._metrics = SimulationMetrics()
+        self._policy = policy
+        self._max_ticks = max_ticks
+
+        if policy is not None:
+            self._metrics.policy_name = policy.name
 
     # ------------------------------------------------------------------
     # Properties
@@ -97,6 +119,10 @@ class SimulationEngine:
     @property
     def metrics(self) -> SimulationMetrics:
         return self._metrics
+
+    @property
+    def policy(self) -> CoordinationPolicy | None:
+        return self._policy
 
     # ------------------------------------------------------------------
     # Setup
@@ -145,23 +171,27 @@ class SimulationEngine:
     def update(self) -> None:
         """Advance the simulation by one tick.
 
-        Each robot moves one waypoint every ``config.robot_step_delay``
-        ticks.  Collision detection runs after every movement step.
+        When a CoordinationPolicy is active, movement decisions are
+        made via snapshot-based simultaneous evaluation.  Otherwise
+        all robots step unconditionally (Phase 1/2 compat).
         """
         if self._finished:
             return
 
         self._tick += 1
 
+        # Safety limit — prevent infinite loops.
+        if self._tick >= self._max_ticks:
+            self._finished = True
+            self._metrics.set_total_ticks(self._tick)
+            return
+
         # Move all robots at the configured step cadence.
         if self._tick % self._config.robot_step_delay == 0:
-            for robot in self._fleet:
-                was_moving = not robot.has_reached_goal
-                robot.step()
-                if was_moving:
-                    self._metrics.record_step(robot.robot_id)
-                if robot.has_reached_goal and was_moving:
-                    self._metrics.record_arrival(robot.robot_id, self._tick)
+            if self._policy is not None:
+                self._update_with_policy()
+            else:
+                self._update_without_policy()
 
             # Detect collisions after all robots have moved.
             collisions = detect_collisions(self._fleet, self._tick)
@@ -172,3 +202,66 @@ class SimulationEngine:
         if self._fleet.all_arrived:
             self._finished = True
             self._metrics.set_total_ticks(self._tick)
+
+    # ------------------------------------------------------------------
+    # Phase 1/2 backward-compatible update (no policy)
+    # ------------------------------------------------------------------
+
+    def _update_without_policy(self) -> None:
+        """Step all robots unconditionally (original Phase 2 behavior)."""
+        for robot in self._fleet:
+            was_moving = not robot.has_reached_goal
+            robot.step()
+            if was_moving:
+                self._metrics.record_step(robot.robot_id)
+            if robot.has_reached_goal and was_moving:
+                self._metrics.record_arrival(robot.robot_id, self._tick)
+
+    # ------------------------------------------------------------------
+    # Phase 3+ snapshot-based update (with policy)
+    # ------------------------------------------------------------------
+
+    def _update_with_policy(self) -> None:
+        """Snapshot → decide → apply → record.
+
+        1. Build a snapshot of all robots' states and intended moves.
+        2. Pass to the policy for simultaneous decision-making.
+        3. Apply approved movements.
+        4. Record metrics.
+        """
+        assert self._policy is not None
+
+        # 1. Snapshot
+        snapshots: list[RobotSnapshot] = []
+        for robot in self._fleet:
+            snapshots.append(RobotSnapshot(
+                robot_id=robot.robot_id,
+                position=robot.position,
+                intended_next=robot.intended_next_position,
+                state=robot.state,
+            ))
+
+        # 2. Decide
+        decisions = self._policy.decide(snapshots)
+
+        # 3. Apply
+        for robot in self._fleet:
+            decision = decisions.get(robot.robot_id, Decision.MOVE)
+            was_active = robot.state in (RobotState.MOVING, RobotState.WAITING)
+
+            if not was_active:
+                continue
+
+            if decision is Decision.WAIT:
+                robot.wait()
+                self._metrics.record_wait(robot.robot_id)
+            else:
+                # Ensure the robot is in MOVING state before stepping.
+                robot.resume()
+                was_at_goal = robot.has_reached_goal
+                robot.step()
+                self._metrics.record_step(robot.robot_id)
+                self._metrics.record_movement(robot.robot_id)
+                if robot.has_reached_goal and not was_at_goal:
+                    self._metrics.record_arrival(robot.robot_id, self._tick)
+
