@@ -6,6 +6,7 @@ Tests the full simulation pipeline with StopAndWaitPolicy:
 - Metrics validation (wait ticks, movements, completion time)
 - Deterministic reproducibility (same scenario = same results)
 - Zero runtime collisions under policy
+- Physically unsolvable scenarios correctly report DEADLOCK
 - Backward compatibility (no policy = Phase 2 behavior)
 """
 
@@ -184,12 +185,12 @@ class TestEndToEnd:
         assert engine.fleet.all_arrived
         assert engine.metrics.total_collisions == 0
 
-    def test_head_on_corridor_deadlocks_safely(self) -> None:
-        """Head-on in a 1-cell corridor deadlocks but has zero collisions.
+    def test_head_on_corridor_deadlocks(self) -> None:
+        """Head-on in a 1-cell corridor: DEADLOCK, zero collisions.
 
-        This is an expected limitation of stop-and-wait without rerouting.
-        The simulation terminates via max_ticks. The important thing is
-        that no collision ever occurs — the policy prevents movement.
+        Two robots facing each other in a narrow corridor with walls
+        on both sides.  No physical space to pass.  Edge swap is
+        rejected.  Correct outcome: DEADLOCK.
         """
         engine = _build_scenario(
             grid_size=(6, 3),
@@ -205,17 +206,17 @@ class TestEndToEnd:
         _run_to_completion(engine)
 
         assert engine.is_finished
-        # Zero collisions even in deadlock — the policy prevents them.
+        assert engine.deadlocked
+        assert not engine.fleet.all_arrived
         assert engine.metrics.total_collisions == 0
-        # Wait ticks should accumulate due to the deadlock.
         assert engine.metrics.total_wait_ticks > 0
 
-    def test_head_on_open_grid_deadlocks_safely(self) -> None:
-        """Head-on on an open grid — A* gives same-row paths, deadlock.
+    def test_head_on_open_grid_deadlocks(self) -> None:
+        """Head-on on an open grid: DEADLOCK (A* plans same-row paths).
 
         Even on an open grid, A* plans both robots along the same
-        optimal row.  Stop-and-wait without rerouting deadlocks here.
-        The important validation is: zero collisions.
+        optimal row.  Without rerouting, they meet head-on and
+        deadlock.  The correct outcome is DEADLOCK, not a swap.
         """
         engine = _build_scenario(
             grid_size=(10, 5),
@@ -227,8 +228,33 @@ class TestEndToEnd:
         _run_to_completion(engine)
 
         assert engine.is_finished
+        assert engine.deadlocked
+        assert not engine.fleet.all_arrived
         assert engine.metrics.total_collisions == 0
-        # Deadlock should have caused wait ticks
+        assert engine.metrics.total_wait_ticks > 0
+
+    def test_four_way_intersection_deadlocks(self) -> None:
+        """4 robots through an intersection: DEADLOCK.
+
+        AMR-01 and AMR-02 are head-on on row 5.
+        AMR-03 and AMR-04 are head-on on column 5.
+        Without rerouting, all pairs meet head-on and deadlock.
+        """
+        engine = _build_scenario(
+            grid_size=(10, 10),
+            robots=[
+                ("AMR-01", (0, 5), (9, 5)),
+                ("AMR-02", (9, 5), (0, 5)),
+                ("AMR-03", (5, 0), (5, 9)),
+                ("AMR-04", (5, 9), (5, 0)),
+            ],
+        )
+        _run_to_completion(engine)
+
+        assert engine.is_finished
+        assert engine.deadlocked
+        assert not engine.fleet.all_arrived
+        assert engine.metrics.total_collisions == 0
         assert engine.metrics.total_wait_ticks > 0
 
     def test_crossing_paths_all_arrive(self) -> None:
@@ -265,7 +291,6 @@ class TestEndToEnd:
         assert engine.metrics.total_collisions == 0
         assert engine.metrics.total_wait_ticks == 0
 
-
     def test_simulation_terminates(self) -> None:
         """Simulation doesn't hang — terminates within max_ticks."""
         engine = _build_scenario(
@@ -295,7 +320,7 @@ class TestMetrics:
         )
         _run_to_completion(engine)
 
-        # In a corridor, one robot will wait while the other passes
+        # Head-on in 1-cell corridor → deadlock with wait ticks
         assert engine.metrics.total_wait_ticks > 0
 
     def test_movements_counted(self) -> None:
@@ -401,6 +426,34 @@ class TestDeterminism:
         run1 = run_once()
         run2 = run_once()
         assert run1 == run2
+
+    def test_determinism_deadlock_scenario(self) -> None:
+        """Deadlock scenarios produce identical metrics across runs."""
+        def run_once() -> dict:
+            engine = _build_scenario(
+                grid_size=(6, 3),
+                robots=[
+                    ("AMR-01", (0, 1), (5, 1)),
+                    ("AMR-02", (5, 1), (0, 1)),
+                ],
+                obstacles=[
+                    (0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0),
+                    (0, 2), (1, 2), (2, 2), (3, 2), (4, 2), (5, 2),
+                ],
+            )
+            _run_to_completion(engine)
+            return {
+                "deadlocked": engine.deadlocked,
+                "total_ticks": engine.metrics.total_ticks,
+                "total_wait_ticks": engine.metrics.total_wait_ticks,
+                "collisions": engine.metrics.total_collisions,
+            }
+
+        run1 = run_once()
+        run2 = run_once()
+        assert run1 == run2
+        assert run1["deadlocked"] is True
+        assert run1["collisions"] == 0
 
 
 # ==================================================================

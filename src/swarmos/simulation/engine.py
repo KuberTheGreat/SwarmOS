@@ -56,6 +56,8 @@ class SimulationEngine:
     __slots__ = (
         "_grid", "_fleet", "_config", "_tick", "_finished",
         "_metrics", "_policy", "_max_ticks",
+        "_consecutive_idle_ticks", "_deadlocked", "_last_total_steps",
+        "_pre_move_positions",
     )
 
     def __init__(
@@ -81,6 +83,10 @@ class SimulationEngine:
         self._metrics = SimulationMetrics()
         self._policy = policy
         self._max_ticks = max_ticks
+        self._consecutive_idle_ticks: int = 0
+        self._deadlocked: bool = False
+        self._last_total_steps: int = -1
+        self._pre_move_positions: dict[str, Position] = {}
 
         if policy is not None:
             self._metrics.policy_name = policy.name
@@ -115,6 +121,11 @@ class SimulationEngine:
     @property
     def is_finished(self) -> bool:
         return self._finished
+
+    @property
+    def deadlocked(self) -> bool:
+        """True if the simulation ended due to deadlock."""
+        return self._deadlocked
 
     @property
     def metrics(self) -> SimulationMetrics:
@@ -188,18 +199,53 @@ class SimulationEngine:
 
         # Move all robots at the configured step cadence.
         if self._tick % self._config.robot_step_delay == 0:
+            # Capture pre-move positions for edge-swap detection.
+            self._pre_move_positions = {
+                r.robot_id: r.position for r in self._fleet
+            }
+
             if self._policy is not None:
                 self._update_with_policy()
             else:
                 self._update_without_policy()
 
-            # Detect collisions after all robots have moved.
-            collisions = detect_collisions(self._fleet, self._tick)
+            # Detect collisions (node + edge swap) after movement.
+            collisions = detect_collisions(
+                self._fleet, self._tick, self._pre_move_positions,
+            )
             if collisions:
                 self._metrics.record_collisions(collisions)
 
+            # Deadlock detection: if no robot moved for enough
+            # consecutive *movement* ticks, declare deadlock and stop.
+            # This must be inside the step-delay block so that
+            # non-movement ticks are not counted as idle.
+            if self._policy is not None and not self._finished:
+                active = sum(
+                    1 for r in self._fleet
+                    if r.state in (RobotState.MOVING, RobotState.WAITING)
+                )
+                if active > 0:
+                    tick_movements = sum(
+                        self._metrics.per_robot[r.robot_id].steps_taken
+                        for r in self._fleet
+                        if r.robot_id in self._metrics.per_robot
+                    )
+                    if self._last_total_steps >= 0:
+                        if tick_movements == self._last_total_steps:
+                            self._consecutive_idle_ticks += 1
+                        else:
+                            self._consecutive_idle_ticks = 0
+                    self._last_total_steps = tick_movements
+
+                    deadlock_threshold = max(active * 2, 4)
+                    if self._consecutive_idle_ticks >= deadlock_threshold:
+                        self._deadlocked = True
+                        self._finished = True
+                        self._metrics.set_total_ticks(self._tick)
+
         # Simulation ends when all robots have arrived.
-        if self._fleet.all_arrived:
+        if not self._finished and self._fleet.all_arrived:
             self._finished = True
             self._metrics.set_total_ticks(self._tick)
 

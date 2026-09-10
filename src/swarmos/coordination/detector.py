@@ -118,22 +118,34 @@ def detect_path_conflicts(fleet: Fleet) -> list[Conflict]:
 # Collision detection (runtime)
 # ------------------------------------------------------------------
 
-def detect_collisions(fleet: Fleet, tick: int) -> list[Collision]:
-    """Detect actual collisions — robots occupying the same cell right now.
+def detect_collisions(
+    fleet: Fleet,
+    tick: int,
+    previous_positions: dict[str, Position] | None = None,
+) -> list[Collision]:
+    """Detect actual collisions at runtime.
+
+    Checks for:
+        1. **Node collisions** — two robots occupying the same cell.
+        2. **Edge collisions** — two robots that swapped adjacent cells
+           (traversed the same edge in opposite directions).
 
     Parameters:
-        fleet: The active fleet.
-        tick:  The current simulation tick.
+        fleet:              The active fleet.
+        tick:               The current simulation tick.
+        previous_positions: Optional mapping of robot_id → position
+                            *before* the current tick's movement.
+                            Required for edge-swap detection.
 
     Returns:
-        A list of :class:`Collision` instances for each pair of robots
-        sharing a cell.
+        A list of :class:`Collision` instances for each violation.
     """
     collisions: list[Collision] = []
     robots = list(fleet)
 
     for i, robot_a in enumerate(robots):
         for robot_b in robots[i + 1:]:
+            # --- Node collision ---
             if robot_a.position == robot_b.position:
                 collisions.append(Collision(
                     robot_a_id=robot_a.robot_id,
@@ -142,4 +154,23 @@ def detect_collisions(fleet: Fleet, tick: int) -> list[Collision]:
                     tick=tick,
                 ))
 
+            # --- Edge collision (swap) ---
+            if previous_positions is not None:
+                prev_a = previous_positions.get(robot_a.robot_id)
+                prev_b = previous_positions.get(robot_b.robot_id)
+                if prev_a is not None and prev_b is not None:
+                    # A was at prev_a, now at robot_a.position
+                    # B was at prev_b, now at robot_b.position
+                    # Swap: A moved to where B was, B moved to where A was
+                    if (robot_a.position == prev_b
+                            and robot_b.position == prev_a
+                            and prev_a != prev_b):
+                        collisions.append(Collision(
+                            robot_a_id=robot_a.robot_id,
+                            robot_b_id=robot_b.robot_id,
+                            position=robot_a.position,
+                            tick=tick,
+                        ))
+
     return collisions
+

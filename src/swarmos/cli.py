@@ -137,6 +137,22 @@ def main(argv: list[str] | None = None) -> None:
         _run_visual(engine)
 
 
+def _report_outcome(engine: SimulationEngine) -> None:
+    """Print metrics and explicit simulation outcome."""
+    print(f"\n{engine.metrics.summary()}")
+
+    # Determine and report outcome.
+    if engine.fleet.all_arrived:
+        print("[SwarmOS] Simulation result: SUCCESS")
+    elif engine.deadlocked:
+        print("[SwarmOS] Simulation result: DEADLOCK — no progress possible")
+    else:
+        print("[SwarmOS] Simulation result: TIMEOUT — max ticks reached")
+
+    for robot in engine.fleet:
+        print(f"[SwarmOS] {robot.robot_id}: final pos={robot.position}, state={robot.state.name}")
+
+
 def _run_headless(engine: SimulationEngine) -> None:
     """Run the simulation without visualisation (for benchmarking)."""
     from swarmos.simulation.engine import SimulationEngine  # type hint
@@ -145,10 +161,7 @@ def _run_headless(engine: SimulationEngine) -> None:
     while not engine.is_finished:
         engine.update()
 
-    print(f"\n{engine.metrics.summary()}")
-
-    for robot in engine.fleet:
-        print(f"[SwarmOS] {robot.robot_id}: final pos={robot.position}, state={robot.state.name}")
+    _report_outcome(engine)
 
 
 def _run_visual(engine: SimulationEngine) -> None:
@@ -169,12 +182,8 @@ def _run_visual(engine: SimulationEngine) -> None:
         renderer.tick()
 
     renderer.shutdown()
-    print(f"\n{engine.metrics.summary()}")
-
-    for robot in engine.fleet:
-        print(f"[SwarmOS] {robot.robot_id}: final pos={robot.position}, state={robot.state.name}")
+    _report_outcome(engine)
 
 
 if __name__ == "__main__":
     main()
-

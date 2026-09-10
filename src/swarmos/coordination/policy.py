@@ -82,12 +82,14 @@ class StopAndWaitPolicy(CoordinationPolicy):
        *same* cell.  The robot with the *lowest* ID (lexicographic)
        moves; all others wait.
 
-    4. **Edge conflict** — two robots would swap positions (A→B and
-       B→A).  The robot with the *lowest* ID moves; the other waits.
+    4. **Edge conflict** — two robots intend to swap adjacent cells
+       (A→B, B→A).  This is physically unsafe: two AMRs cannot pass
+       through each other on a single grid edge.  Both robots wait.
 
-    5. **Occupancy conflict** — a robot wants to move into a cell
-       currently occupied by another robot that is *not* moving away
-       from that cell.  The moving robot waits.
+    5. **Occupancy conflict** (iterative) — a robot wants to move into
+       a cell currently occupied by another robot that is *not* moving
+       away from that cell.  The moving robot waits.  This check
+       iterates until no decisions change, handling cascading blocks.
 
     Tie-breaking:
         Lower robot ID wins (Python's default string ``<`` comparison).
@@ -99,6 +101,7 @@ class StopAndWaitPolicy(CoordinationPolicy):
         - No rerouting
         - No reservation or communication
     """
+
 
     @property
     def name(self) -> str:
@@ -127,85 +130,89 @@ class StopAndWaitPolicy(CoordinationPolicy):
                 active_movers.append(snap)
                 decisions[snap.robot_id] = Decision.MOVE  # tentative
 
-        # ── Phase 2: detect conflicts among active movers ─────────
+        # ── Phase 2: detect node conflicts among active movers ────
         # Build an index: intended_next → list of robots heading there.
         target_map: dict[tuple[int, int], list[RobotSnapshot]] = {}
         for snap in active_movers:
             key = (snap.intended_next.x, snap.intended_next.y)
             target_map.setdefault(key, []).append(snap)
 
-        # --- Node conflicts ---
         # If multiple robots target the same cell, only the one with
         # the lowest ID moves; all others wait.
         for cell_key, claimants in target_map.items():
             if len(claimants) > 1:
-                # Sort by robot_id — lowest wins.
                 claimants.sort(key=lambda s: s.robot_id)
                 for loser in claimants[1:]:
                     decisions[loser.robot_id] = Decision.WAIT
 
-        # --- Edge conflicts ---
-        # Two robots A and B would swap positions: A→B_pos and B→A_pos.
-        # In stop-and-wait with fixed paths, BOTH must wait because:
-        #   - If only B waits, A moves into B's cell → collision
-        #   - If only A waits, B moves into A's cell → collision
-        # This is a known limitation — deadlock without rerouting.
-        checked: set[tuple[str, str]] = set()
-        for snap_a in active_movers:
-            for snap_b in active_movers:
-                if snap_a.robot_id >= snap_b.robot_id:
-                    continue
-                pair_key = (snap_a.robot_id, snap_b.robot_id)
-                if pair_key in checked:
-                    continue
-                checked.add(pair_key)
-
-                if (snap_a.intended_next == snap_b.position
-                        and snap_b.intended_next == snap_a.position):
-                    # Edge conflict — both must wait in stop-and-wait.
-                    # Lower ID gets to move first in future ticks when
-                    # the situation changes (e.g., on open grids).
-                    decisions[snap_a.robot_id] = Decision.WAIT
-                    decisions[snap_b.robot_id] = Decision.WAIT
-
-        # --- Occupancy conflicts ---
-        # A robot wants to enter a cell occupied by another robot that
-        # is NOT moving away from that cell.
-        # Build a set of positions being vacated by active movers who
-        # are still allowed to move.
-        vacating: set[tuple[int, int]] = set()
+        # ── Phase 3: detect edge conflicts (swaps) ───────────────
+        # Two robots attempting to swap adjacent cells (A→B, B→A)
+        # is physically unsafe — they would traverse the same edge
+        # in opposite directions.  Both must wait.
+        #
+        # Build a lookup: (from, to) → robot_id for robots still MOVE.
+        move_edges: dict[tuple[tuple[int, int], tuple[int, int]], str] = {}
         for snap in active_movers:
-            if (decisions[snap.robot_id] is Decision.MOVE
-                    and snap.intended_next != snap.position):
-                vacating.add((snap.position.x, snap.position.y))
+            if decisions[snap.robot_id] is Decision.MOVE:
+                from_key = (snap.position.x, snap.position.y)
+                to_key = (snap.intended_next.x, snap.intended_next.y)
+                move_edges[(from_key, to_key)] = snap.robot_id
 
-        # Build a set of all currently occupied positions.
+        for snap in active_movers:
+            if decisions[snap.robot_id] is not Decision.MOVE:
+                continue
+            from_key = (snap.position.x, snap.position.y)
+            to_key = (snap.intended_next.x, snap.intended_next.y)
+            # Check if any other robot is traversing the reverse edge.
+            reverse = (to_key, from_key)
+            if reverse in move_edges:
+                other_id = move_edges[reverse]
+                if other_id != snap.robot_id:
+                    # Edge conflict: both robots wait.
+                    decisions[snap.robot_id] = Decision.WAIT
+                    decisions[other_id] = Decision.WAIT
+
+        # ── Phase 4: occupancy conflicts (iterative) ─────────────
+        # A robot wants to enter a cell occupied by another robot
+        # that is NOT approved to move away from that cell.
+        #
+        # The check is iterative because a cascade can occur:
+        #   C blocks B → B can't leave → A can't enter B's cell
+        # Each time a robot is downgraded to WAIT, we must recheck
+        # all MOVE robots whose targets depended on the newly-waiting
+        # robot vacating.
+
+        # Build occupied-position index (constant across iterations).
         occupied: dict[tuple[int, int], list[RobotSnapshot]] = {}
         for snap in snapshots:
             key = (snap.position.x, snap.position.y)
             occupied.setdefault(key, []).append(snap)
 
-        for snap in active_movers:
-            if decisions[snap.robot_id] is Decision.WAIT:
-                continue  # already waiting
+        changed = True
+        while changed:
+            changed = False
 
-            target_key = (snap.intended_next.x, snap.intended_next.y)
-            if target_key in occupied:
-                # Someone is sitting there — are they leaving?
-                blockers = occupied[target_key]
-                for blocker in blockers:
+            for snap in active_movers:
+                if decisions[snap.robot_id] is Decision.WAIT:
+                    continue  # already waiting
+
+                target_key = (snap.intended_next.x, snap.intended_next.y)
+                if target_key not in occupied:
+                    continue  # target cell is empty
+
+                for blocker in occupied[target_key]:
                     if blocker.robot_id == snap.robot_id:
                         continue  # self
 
+                    # Is the blocker approved to leave this cell?
                     blocker_leaving = (
-                        target_key in vacating
-                        and decisions.get(blocker.robot_id) is Decision.MOVE
+                        decisions.get(blocker.robot_id) is Decision.MOVE
                         and blocker.intended_next != blocker.position
                     )
                     if not blocker_leaving:
                         decisions[snap.robot_id] = Decision.WAIT
+                        changed = True
                         break
 
         return decisions
-
 

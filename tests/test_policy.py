@@ -3,7 +3,7 @@
 Tests the StopAndWaitPolicy in isolation, verifying:
 - Safe movements → MOVE
 - Node conflict → lower ID MOVE, higher ID WAIT
-- Edge conflict → lower ID MOVE, higher ID WAIT
+- Edge conflict (swap) → both WAIT
 - Occupancy conflict → WAIT
 - Deterministic tie-breaking
 - Iteration-order independence (simultaneous-update semantics)
@@ -153,24 +153,56 @@ class TestNodeConflict:
 
 
 # ==================================================================
-# StopAndWaitPolicy — edge conflicts
+# StopAndWaitPolicy — edge conflicts (swaps)
 # ==================================================================
 
 class TestEdgeConflict:
+    """Edge swaps are physically unsafe — both robots must WAIT."""
+
     def setup_method(self) -> None:
         self.policy = StopAndWaitPolicy()
 
-    def test_head_on_swap(self) -> None:
-        """Two robots swapping positions: both wait (can't resolve without rerouting)."""
+    def test_edge_swap_both_wait(self) -> None:
+        """Two robots swapping positions: both WAIT.
+
+        A: (3,0) → (4,0)
+        B: (4,0) → (3,0)
+
+        They would traverse the same edge in opposite directions.
+        This is physically impossible for grid-occupying AMRs.
+        """
         snaps = [
             _snap("AMR-01", (3, 0), (4, 0)),
             _snap("AMR-02", (4, 0), (3, 0)),
         ]
         decisions = self.policy.decide(snaps)
-        # In stop-and-wait, both must wait in a swap — moving either
-        # one into the other's cell would cause a collision.
         assert decisions["AMR-01"] is Decision.WAIT
         assert decisions["AMR-02"] is Decision.WAIT
+
+    def test_edge_swap_vertical(self) -> None:
+        """Vertical edge swap: both WAIT."""
+        snaps = [
+            _snap("AMR-01", (5, 3), (5, 4)),
+            _snap("AMR-02", (5, 4), (5, 3)),
+        ]
+        decisions = self.policy.decide(snaps)
+        assert decisions["AMR-01"] is Decision.WAIT
+        assert decisions["AMR-02"] is Decision.WAIT
+
+    def test_edge_swap_deterministic(self) -> None:
+        """Edge swap result is the same regardless of input order."""
+        forward = [
+            _snap("AMR-01", (3, 0), (4, 0)),
+            _snap("AMR-02", (4, 0), (3, 0)),
+        ]
+        backward = list(reversed(forward))
+        d_fwd = self.policy.decide(forward)
+        d_bwd = self.policy.decide(backward)
+        # Both must WAIT in both orderings.
+        assert d_fwd["AMR-01"] is Decision.WAIT
+        assert d_fwd["AMR-02"] is Decision.WAIT
+        assert d_bwd["AMR-01"] is Decision.WAIT
+        assert d_bwd["AMR-02"] is Decision.WAIT
 
     def test_no_edge_conflict_same_direction(self) -> None:
         """Robots moving in the same direction — no edge conflict."""
@@ -181,6 +213,19 @@ class TestEdgeConflict:
         decisions = self.policy.decide(snaps)
         assert decisions["AMR-01"] is Decision.MOVE
         assert decisions["AMR-02"] is Decision.MOVE
+
+    def test_edge_swap_in_corridor(self) -> None:
+        """Edge swap in a narrow corridor: both WAIT.
+
+        This models the head-on scenario — no physical space to pass.
+        """
+        snaps = [
+            _snap("AMR-01", (2, 0), (3, 0)),
+            _snap("AMR-02", (3, 0), (2, 0)),
+        ]
+        decisions = self.policy.decide(snaps)
+        assert decisions["AMR-01"] is Decision.WAIT
+        assert decisions["AMR-02"] is Decision.WAIT
 
 
 # ==================================================================
@@ -217,16 +262,9 @@ class TestOccupancyConflict:
             _snap("AMR-02", (1, 0), (2, 0), state=RobotState.WAITING),
         ]
         decisions = self.policy.decide(snaps)
-        # AMR-02 is WAITING with intended_next (2,0) but it's not going to
-        # be moving — it is WAITING state. The policy should see it's active
-        # (WAITING), but since AMR-02's intended_next != position, it's an
-        # active mover. If AMR-02 gets WAIT decision (stays put), AMR-01
-        # should also WAIT since AMR-02 is not actually leaving.
-        # This depends on the occupancy check seeing AMR-02 is not vacating.
-        # Let's verify the chain: AMR-02 is trying to go to (2,0) but
-        # won't be blocked by anyone → MOVE. So AMR-01 can enter (1,0).
-        # Actually, AMR-02 is WAITING state, so it IS an active mover.
-        # If no one blocks AMR-02, AMR-02 gets MOVE, then AMR-01 can enter.
+        # AMR-02 is WAITING state but is an active mover (intended != pos).
+        # If no one blocks AMR-02 at (2,0), AMR-02 gets MOVE, and
+        # AMR-01 can then enter (1,0).
         assert decisions["AMR-02"] is Decision.MOVE
         assert decisions["AMR-01"] is Decision.MOVE
 
@@ -333,6 +371,207 @@ class TestComplexScenarios:
         decisions = self.policy.decide(snaps)
         assert decisions["AMR-01"] is Decision.MOVE
         assert decisions["AMR-02"] is Decision.WAIT
-        # Edge conflict — both wait in stop-and-wait
+        # Edge conflict — both WAIT (physically unsafe swap)
         assert decisions["AMR-03"] is Decision.WAIT
         assert decisions["AMR-04"] is Decision.WAIT
+
+
+# ==================================================================
+# Cascading occupancy, 4-way intersection, determinism
+# ==================================================================
+
+class TestCascadingOccupancy:
+    """Test the iterative occupancy check with cascading blocks."""
+
+    def setup_method(self) -> None:
+        self.policy = StopAndWaitPolicy()
+
+    def test_chain_blocked_by_stationary(self) -> None:
+        """A→B→C where C is ARRIVED.  B blocked by C, A blocked by B."""
+        snaps = [
+            _snap("AMR-01", (0, 0), (1, 0)),
+            _snap("AMR-02", (1, 0), (2, 0)),
+            _snap("AMR-03", (2, 0), state=RobotState.ARRIVED),
+        ]
+        decisions = self.policy.decide(snaps)
+        assert decisions["AMR-01"] is Decision.WAIT
+        assert decisions["AMR-02"] is Decision.WAIT
+
+    def test_chain_unblocked(self) -> None:
+        """A→B→C where all are moving forward into empty cells."""
+        snaps = [
+            _snap("AMR-01", (0, 0), (1, 0)),
+            _snap("AMR-02", (1, 0), (2, 0)),
+            _snap("AMR-03", (2, 0), (3, 0)),
+        ]
+        decisions = self.policy.decide(snaps)
+        assert decisions["AMR-01"] is Decision.MOVE
+        assert decisions["AMR-02"] is Decision.MOVE
+        assert decisions["AMR-03"] is Decision.MOVE
+
+    def test_three_way_rotation_rejected(self) -> None:
+        """A→B, B→C, C→A — circular chain is rejected.
+
+        Under the physical model, C→A is an edge conflict with A→B
+        only if they share an edge.  But more importantly, C is
+        trying to enter A's cell while A is trying to leave — and
+        A is trying to enter B's cell while B is leaving for C's cell.
+
+        The edge conflict between C→(0,0) and A@(0,0)→(1,0) is NOT
+        an edge swap because A is going to (1,0) not to (0,1).
+
+        An edge swap requires A.pos == B.intended AND B.pos == A.intended.
+        C: (0,1)→(0,0), A: (0,0)→(1,0).  C.intended=(0,0)=A.pos ✓
+        but A.intended=(1,0)≠C.pos=(0,1) ✗.  So NO edge conflict.
+
+        This is a chain where everyone moves forward into the cell
+        being vacated by the next robot.  All MOVE.
+        """
+        snaps = [
+            _snap("AMR-01", (0, 0), (1, 0)),
+            _snap("AMR-02", (1, 0), (0, 1)),
+            _snap("AMR-03", (0, 1), (0, 0)),
+        ]
+        decisions = self.policy.decide(snaps)
+        # Circular chain: each robot enters the cell being vacated
+        # by the next.  No edge swaps (edges are different).
+        assert decisions["AMR-01"] is Decision.MOVE
+        assert decisions["AMR-02"] is Decision.MOVE
+        assert decisions["AMR-03"] is Decision.MOVE
+
+
+class TestFourWayIntersection:
+    """Regression: 4 robots converging on center must not all wait."""
+
+    def setup_method(self) -> None:
+        self.policy = StopAndWaitPolicy()
+
+    def test_four_robots_same_target(self) -> None:
+        """Four robots all want the same cell.  Only one moves."""
+        snaps = [
+            _snap("AMR-01", (4, 5), (5, 5)),
+            _snap("AMR-02", (6, 5), (5, 5)),
+            _snap("AMR-03", (5, 4), (5, 5)),
+            _snap("AMR-04", (5, 6), (5, 5)),
+        ]
+        decisions = self.policy.decide(snaps)
+        assert decisions["AMR-01"] is Decision.MOVE  # lowest ID wins
+        assert decisions["AMR-02"] is Decision.WAIT
+        assert decisions["AMR-03"] is Decision.WAIT
+        assert decisions["AMR-04"] is Decision.WAIT
+
+    def test_edge_swap_at_intersection(self) -> None:
+        """Robot leaving center swaps with robot entering — both WAIT.
+
+        AMR-01: (5,5)→(6,5) and AMR-02: (6,5)→(5,5) is an edge swap.
+        Both must WAIT.  AMR-03 and AMR-04 also want (5,5) but lose
+        the node conflict and can't enter because AMR-01 stays.
+        """
+        snaps = [
+            _snap("AMR-01", (5, 5), (6, 5)),
+            _snap("AMR-02", (6, 5), (5, 5)),
+            _snap("AMR-03", (5, 4), (5, 5)),
+            _snap("AMR-04", (5, 6), (5, 5)),
+        ]
+        decisions = self.policy.decide(snaps)
+        # AMR-01 and AMR-02 have an edge conflict — both WAIT
+        assert decisions["AMR-01"] is Decision.WAIT
+        assert decisions["AMR-02"] is Decision.WAIT
+        # AMR-03 and AMR-04 lose node conflict to AMR-02 (but AMR-02
+        # is now WAIT), AND AMR-01 is still at (5,5) not leaving.
+        # So they are blocked by occupancy too.
+        assert decisions["AMR-03"] is Decision.WAIT
+        assert decisions["AMR-04"] is Decision.WAIT
+
+
+class TestSharedDestination:
+    """Regression: two robots want the same empty cell."""
+
+    def setup_method(self) -> None:
+        self.policy = StopAndWaitPolicy()
+
+    def test_higher_priority_moves(self) -> None:
+        snaps = [
+            _snap("AMR-01", (0, 0), (1, 0)),
+            _snap("AMR-02", (2, 0), (1, 0)),
+        ]
+        decisions = self.policy.decide(snaps)
+        assert decisions["AMR-01"] is Decision.MOVE
+        assert decisions["AMR-02"] is Decision.WAIT
+
+
+class TestReversedIterationOrder:
+    """Regression: input order must not affect output."""
+
+    def setup_method(self) -> None:
+        self.policy = StopAndWaitPolicy()
+
+    def test_reversed_order_same_result(self) -> None:
+        forward = [
+            _snap("AMR-01", (4, 5), (5, 5)),
+            _snap("AMR-02", (6, 5), (5, 5)),
+            _snap("AMR-03", (5, 4), (5, 5)),
+            _snap("AMR-04", (5, 6), (5, 5)),
+        ]
+        backward = list(reversed(forward))
+        d_fwd = self.policy.decide(forward)
+        d_bwd = self.policy.decide(backward)
+        for rid in ["AMR-01", "AMR-02", "AMR-03", "AMR-04"]:
+            assert d_fwd[rid] is d_bwd[rid], f"{rid}: {d_fwd[rid]} != {d_bwd[rid]}"
+
+    def test_edge_swap_reversed_order(self) -> None:
+        """Edge swap is deterministic regardless of input order."""
+        forward = [
+            _snap("AMR-01", (3, 0), (4, 0)),
+            _snap("AMR-02", (4, 0), (3, 0)),
+        ]
+        backward = list(reversed(forward))
+        d_fwd = self.policy.decide(forward)
+        d_bwd = self.policy.decide(backward)
+        # Both WAIT in both orderings.
+        assert d_fwd["AMR-01"] is Decision.WAIT
+        assert d_fwd["AMR-02"] is Decision.WAIT
+        assert d_bwd["AMR-01"] is Decision.WAIT
+        assert d_bwd["AMR-02"] is Decision.WAIT
+
+
+# ==================================================================
+# Deadlock detection in policy
+# ==================================================================
+
+class TestDeadlockScenarios:
+    """Scenarios that are physically unsolvable under stop-and-wait."""
+
+    def setup_method(self) -> None:
+        self.policy = StopAndWaitPolicy()
+
+    def test_head_on_pair_all_wait(self) -> None:
+        """Two robots facing each other on a line — both must WAIT.
+
+        This is the fundamental head-on deadlock.  Without rerouting,
+        neither robot can make progress.
+        """
+        snaps = [
+            _snap("AMR-01", (2, 0), (3, 0)),
+            _snap("AMR-02", (3, 0), (2, 0)),
+        ]
+        decisions = self.policy.decide(snaps)
+        assert decisions["AMR-01"] is Decision.WAIT
+        assert decisions["AMR-02"] is Decision.WAIT
+
+    def test_four_robot_corridor_deadlock(self) -> None:
+        """Four robots paired head-on in a corridor — all WAIT."""
+        snaps = [
+            _snap("AMR-01", (2, 0), (3, 0)),
+            _snap("AMR-02", (3, 0), (4, 0)),
+            _snap("AMR-03", (5, 0), (4, 0)),
+            _snap("AMR-04", (4, 0), (3, 0)),
+        ]
+        decisions = self.policy.decide(snaps)
+        # AMR-02 and AMR-04 both want to swap direction → edge conflict
+        # or node conflict at (3,0)/(4,0).  All blocked.
+        move_count = sum(1 for d in decisions.values() if d is Decision.MOVE)
+        # At most one robot could theoretically move, but the chain
+        # should cause cascading blocks.  Verify zero collisions if
+        # all wait.
+        assert all(d is Decision.WAIT for d in decisions.values()) or move_count <= 1
