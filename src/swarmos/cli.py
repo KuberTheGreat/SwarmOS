@@ -55,6 +55,12 @@ def main(argv: list[str] | None = None) -> None:
         default="none",
         help="Coordination policy: 'none' (Phase 1/2) or 'stop_and_wait' (Phase 3)",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print Phase 5 intent exchange and conflict observation logs",
+    )
 
     args = parser.parse_args(argv)
 
@@ -132,14 +138,19 @@ def main(argv: list[str] | None = None) -> None:
 
     # --- Run ---
     if args.headless:
-        _run_headless(engine)
+        _run_headless(engine, verbose=args.verbose)
     else:
-        _run_visual(engine)
+        _run_visual(engine, verbose=args.verbose)
 
 
 def _report_outcome(engine: SimulationEngine) -> None:
     """Print metrics and explicit simulation outcome."""
     print(f"\n{engine.metrics.summary()}")
+
+    # Communication metrics.
+    t = engine.transport
+    print(f"  Messages sent:        {t.metrics_sent}")
+    print(f"  Messages delivered:   {t.metrics_delivered}")
 
     # Determine and report outcome.
     if engine.fleet.all_arrived:
@@ -153,18 +164,71 @@ def _report_outcome(engine: SimulationEngine) -> None:
         print(f"[SwarmOS] {robot.robot_id}: final pos={robot.position}, state={robot.state.name}")
 
 
-def _run_headless(engine: SimulationEngine) -> None:
-    """Run the simulation without visualisation (for benchmarking)."""
-    from swarmos.simulation.engine import SimulationEngine  # type hint
+def _log_intents(engine: SimulationEngine) -> None:
+    """Print intent exchange and conflict observations for the current tick."""
+    from swarmos.communication.intent import IntentAction
 
+    tick = engine.tick
+    for robot in engine.fleet:
+        if robot.has_reached_goal:
+            continue
+        peer = robot.peer_state
+        if not peer:
+            continue
+
+        # Derive own intent label
+        from swarmos.robot.state import RobotState
+        intent_map = {
+            RobotState.MOVING: "MOVE",
+            RobotState.WAITING: "WAIT",
+            RobotState.IDLE: "IDLE",
+            RobotState.ARRIVED: "COMPLETE",
+        }
+        own_intent = intent_map.get(robot.state, "IDLE")
+        own_next = robot.intended_next_position
+        print(
+            f"  [T={tick}] {robot.robot_id} intent: "
+            f"{own_intent} {robot.position} → {own_next}"
+        )
+
+        # Show what this robot knows about peers
+        for pid, msg in sorted(peer.items()):
+            print(
+                f"           └─ knows {pid}: "
+                f"{msg.intent.name} {msg.position} → {msg.intended_next} "
+                f"(t={msg.timestamp})"
+            )
+
+        # Observed conflicts
+        conflicts = robot.observe_conflicts(tick)
+        for c in conflicts:
+            print(
+                f"           ⚠ observed {c.conflict_type.name} conflict "
+                f"with {c.robot_b_id} at {c.position}"
+            )
+
+
+def _run_headless(
+    engine: SimulationEngine,
+    verbose: bool = False,
+) -> None:
+    """Run the simulation without visualisation (for benchmarking)."""
     print("[SwarmOS] Running headless simulation…")
+    if verbose:
+        print("[SwarmOS] Verbose mode: showing intent exchange")
+
     while not engine.is_finished:
         engine.update()
+        if verbose and engine.tick % engine.config.robot_step_delay == 0:
+            _log_intents(engine)
 
     _report_outcome(engine)
 
 
-def _run_visual(engine: SimulationEngine) -> None:
+def _run_visual(
+    engine: SimulationEngine,
+    verbose: bool = False,
+) -> None:
     """Run the simulation with the Pygame renderer."""
     from swarmos.visualization.renderer import Renderer
 
@@ -177,6 +241,8 @@ def _run_visual(engine: SimulationEngine) -> None:
 
         if not engine.is_finished:
             engine.update()
+            if verbose and engine.tick % engine.config.robot_step_delay == 0:
+                _log_intents(engine)
 
         renderer.render()
         renderer.tick()

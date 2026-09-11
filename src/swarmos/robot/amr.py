@@ -16,6 +16,10 @@ Phase 3 additions:
     wait()                   — transition to WAITING (stop-and-wait policy)
     resume()                 — transition from WAITING back to MOVING
     intended_next_position   — where the robot *wants* to go next
+
+Phase 5 additions:
+    broadcast_state() now includes IntentAction (MOVE/WAIT/IDLE/COMPLETE)
+    observe_conflicts()  — read-only conflict observation from peer intents
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from swarmos.warehouse.cell import Position
 
 if TYPE_CHECKING:
     from swarmos.communication.interface import CommunicationInterface
+    from swarmos.communication.intent import IntentAction, PotentialConflict
     from swarmos.communication.message import RobotStateMessage
     from swarmos.warehouse.grid import Grid
 
@@ -190,14 +195,69 @@ class AMR:
     # ------------------------------------------------------------------
 
     def broadcast_state(self, tick: int) -> None:
-        """Broadcast current state to peers via the communication interface."""
+        """Broadcast current state and intent to peers.
+
+        Derives the :class:`IntentAction` from the robot's current
+        state:
+
+        * MOVING  → MOVE
+        * WAITING → WAIT
+        * IDLE    → IDLE
+        * ARRIVED → COMPLETE
+        """
         if self._communication is not None:
+            from swarmos.communication.intent import IntentAction
+
+            intent_map = {
+                RobotState.MOVING:  IntentAction.MOVE,
+                RobotState.WAITING: IntentAction.WAIT,
+                RobotState.IDLE:    IntentAction.IDLE,
+                RobotState.ARRIVED: IntentAction.COMPLETE,
+            }
+            intent = intent_map.get(self._state, IntentAction.IDLE)
+
             self._communication.broadcast_state(
                 position=self._position,
                 intended_next=self.intended_next_position,
                 state=self._state,
                 tick=tick,
+                intent=intent,
             )
+
+    def observe_conflicts(self, current_tick: int) -> list[PotentialConflict]:
+        """Observe potential conflicts from local peer intent knowledge.
+
+        Delegates to :class:`IntentObserver`.  This is strictly
+        read-only — it never modifies movement decisions.
+
+        Returns:
+            A list of :class:`PotentialConflict` observations.
+        """
+        if self._communication is None:
+            return []
+
+        from swarmos.communication.intent import (
+            IntentAction,
+            IntentObserver,
+        )
+
+        intent_map = {
+            RobotState.MOVING:  IntentAction.MOVE,
+            RobotState.WAITING: IntentAction.WAIT,
+            RobotState.IDLE:    IntentAction.IDLE,
+            RobotState.ARRIVED: IntentAction.COMPLETE,
+        }
+        own_intent = intent_map.get(self._state, IntentAction.IDLE)
+
+        return IntentObserver.observe(
+            own_id=self._robot_id,
+            own_position=self._position,
+            own_intended=self.intended_next_position,
+            own_intent=own_intent,
+            peer_state=self._communication.peer_state,
+            current_tick=current_tick,
+            stale_threshold=self._communication.stale_threshold,
+        )
 
     # ------------------------------------------------------------------
     # Representation

@@ -243,8 +243,8 @@ Deadlocks are **expected** and **by design** — they demonstrate the limitation
 | 1 | Single AMR navigation (A* on grid) | ✅ |
 | 2 | Multi-AMR simulation + conflict detection | ✅ |
 | 3 | Stop-and-wait collision baseline | ✅ |
-| 4 | Peer-to-peer communication | ⬜ |
-| 5 | Distributed conflict detection | ⬜ |
+| 4 | Peer-to-peer communication | ✅ |
+| 5 | Distributed conflict detection | ✅ |
 | 6 | Reservation / negotiation protocol | ⬜ |
 | 7 | Deadlock detection and resolution | ⬜ |
 | 8 | Dynamic rerouting | ⬜ |
