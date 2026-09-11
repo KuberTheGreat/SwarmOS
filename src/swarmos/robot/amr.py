@@ -28,6 +28,8 @@ from swarmos.robot.state import RobotState
 from swarmos.warehouse.cell import Position
 
 if TYPE_CHECKING:
+    from swarmos.communication.interface import CommunicationInterface
+    from swarmos.communication.message import RobotStateMessage
     from swarmos.warehouse.grid import Grid
 
 
@@ -45,6 +47,7 @@ class AMR:
         "_goal",
         "_path",
         "_state",
+        "_communication",
     )
 
     def __init__(self, robot_id: str, position: Position) -> None:
@@ -53,6 +56,7 @@ class AMR:
         self._goal: Position | None = None
         self._path: Path | None = None
         self._state = RobotState.IDLE
+        self._communication: CommunicationInterface | None = None
 
     # ------------------------------------------------------------------
     # Properties (read-only public interface)
@@ -96,6 +100,22 @@ class AMR:
                 if nxt is not None:
                     return nxt
         return self._position
+
+    @property
+    def communication(self) -> CommunicationInterface | None:
+        """The communication interface component, if attached."""
+        return self._communication
+
+    @communication.setter
+    def communication(self, interface: CommunicationInterface) -> None:
+        self._communication = interface
+
+    @property
+    def peer_state(self) -> dict[str, RobotStateMessage]:
+        """Return the local knowledge of other robots' states."""
+        if self._communication is not None:
+            return self._communication.peer_state
+        return {}
 
     # ------------------------------------------------------------------
     # Planning
@@ -164,6 +184,20 @@ class AMR:
         """
         if self._state is RobotState.WAITING:
             self._state = RobotState.MOVING
+
+    # ------------------------------------------------------------------
+    # Communication
+    # ------------------------------------------------------------------
+
+    def broadcast_state(self, tick: int) -> None:
+        """Broadcast current state to peers via the communication interface."""
+        if self._communication is not None:
+            self._communication.broadcast_state(
+                position=self._position,
+                intended_next=self.intended_next_position,
+                state=self._state,
+                tick=tick,
+            )
 
     # ------------------------------------------------------------------
     # Representation

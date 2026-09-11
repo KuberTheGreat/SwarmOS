@@ -23,12 +23,14 @@ class SimulationConfig:
                            appear to move more slowly (easier to follow
                            visually).
         window_title:      Pygame window title.
+        communication_delay: Number of ticks message delivery is delayed.
     """
 
     cell_size: int = 40
     tick_rate: int = 60
     robot_step_delay: int = 10
     window_title: str = "SwarmOS — Multi-AMR Simulation"
+    communication_delay: int = 0
 
     @property
     def window_width_for(self) -> None:

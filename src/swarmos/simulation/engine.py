@@ -36,6 +36,8 @@ from swarmos.robot.fleet import Fleet
 from swarmos.robot.state import RobotState
 from swarmos.simulation.config import SimulationConfig
 from swarmos.simulation.metrics import SimulationMetrics
+from swarmos.communication.interface import CommunicationInterface
+from swarmos.communication.transport import SimulatedTransport
 from swarmos.warehouse.cell import Position
 from swarmos.warehouse.grid import Grid
 
@@ -57,7 +59,7 @@ class SimulationEngine:
         "_grid", "_fleet", "_config", "_tick", "_finished",
         "_metrics", "_policy", "_max_ticks",
         "_consecutive_idle_ticks", "_deadlocked", "_last_total_steps",
-        "_pre_move_positions",
+        "_pre_move_positions", "_transport",
     )
 
     def __init__(
@@ -87,6 +89,15 @@ class SimulationEngine:
         self._deadlocked: bool = False
         self._last_total_steps: int = -1
         self._pre_move_positions: dict[str, Position] = {}
+        self._transport = SimulatedTransport(delay=self._config.communication_delay)
+
+        # Attach communication interfaces to all robots
+        for robot in self._fleet:
+            if robot.communication is None:
+                robot.communication = CommunicationInterface(
+                    robot_id=robot.robot_id,
+                    transport=self._transport,
+                )
 
         if policy is not None:
             self._metrics.policy_name = policy.name
@@ -134,6 +145,11 @@ class SimulationEngine:
     @property
     def policy(self) -> CoordinationPolicy | None:
         return self._policy
+
+    @property
+    def transport(self) -> SimulatedTransport:
+        """The communication transport layer."""
+        return self._transport
 
     # ------------------------------------------------------------------
     # Setup
@@ -196,6 +212,17 @@ class SimulationEngine:
             self._finished = True
             self._metrics.set_total_ticks(self._tick)
             return
+
+        # --------------------------------------------------------------
+        # Phase 4: Communication Step
+        # --------------------------------------------------------------
+        # 1. Active robots broadcast their current state.
+        for robot in self._fleet:
+            if not robot.has_reached_goal:
+                robot.broadcast_state(self._tick)
+                
+        # 2. Transport delivers any messages due at the current tick.
+        self._transport.deliver_messages(self._tick)
 
         # Move all robots at the configured step cadence.
         if self._tick % self._config.robot_step_delay == 0:
