@@ -299,12 +299,15 @@ class SimulationEngine:
 
         1. Build a snapshot of all robots' states and intended moves.
         2. Pass to the policy for simultaneous decision-making.
+           For DistributedPolicy (Phase 6), each robot computes its
+           own decision from local peer knowledge.
         3. Apply approved movements.
         4. Record metrics.
         """
         assert self._policy is not None
 
-        # 1. Snapshot
+        # 1. Snapshot (used by StopAndWaitPolicy; DistributedPolicy
+        #    reads each robot's peer_state directly).
         snapshots: list[RobotSnapshot] = []
         for robot in self._fleet:
             snapshots.append(RobotSnapshot(
@@ -315,7 +318,23 @@ class SimulationEngine:
             ))
 
         # 2. Decide
-        decisions = self._policy.decide(snapshots)
+        from swarmos.coordination.distributed_policy import DistributedPolicy
+
+        if isinstance(self._policy, DistributedPolicy):
+            decisions = self._policy.decide(snapshots, current_tick=self._tick)
+
+            # Record negotiation metrics.
+            for rid, result in self._policy.last_results.items():
+                if result.reason not in (
+                    "no conflict",
+                    "not actively moving",
+                    "staying in place",
+                ):
+                    self._metrics.record_negotiation(
+                        proceed=(result.decision is Decision.MOVE)
+                    )
+        else:
+            decisions = self._policy.decide(snapshots)
 
         # 3. Apply
         for robot in self._fleet:

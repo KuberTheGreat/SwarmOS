@@ -51,9 +51,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--policy",
         type=str,
-        choices=["none", "stop_and_wait"],
+        choices=["none", "stop_and_wait", "distributed"],
         default="none",
-        help="Coordination policy: 'none' (Phase 1/2) or 'stop_and_wait' (Phase 3)",
+        help="Coordination policy: 'none' (Phase 1/2), 'stop_and_wait' (Phase 3), or 'distributed' (Phase 6)",
     )
     parser.add_argument(
         "--verbose",
@@ -92,6 +92,10 @@ def main(argv: list[str] | None = None) -> None:
     if args.policy == "stop_and_wait":
         from swarmos.coordination.policy import StopAndWaitPolicy
         policy = StopAndWaitPolicy()
+        print(f"[SwarmOS] Policy: {policy.name}")
+    elif args.policy == "distributed":
+        from swarmos.coordination.distributed_policy import DistributedPolicy
+        policy = DistributedPolicy(fleet)
         print(f"[SwarmOS] Policy: {policy.name}")
     else:
         print("[SwarmOS] Policy: NONE (no collision avoidance)")
@@ -206,6 +210,24 @@ def _log_intents(engine: SimulationEngine) -> None:
                 f"           ⚠ observed {c.conflict_type.name} conflict "
                 f"with {c.robot_b_id} at {c.position}"
             )
+
+    # --- Phase 6: Negotiation results ---
+    from swarmos.coordination.distributed_policy import DistributedPolicy
+    if isinstance(engine.policy, DistributedPolicy):
+        results = engine.policy.last_results
+        for rid, result in sorted(results.items()):
+            if result.conflicts:
+                decision_label = "PROCEED" if result.decision.name == "MOVE" else "WAIT"
+                print(
+                    f"  [T={tick}] {rid} negotiation: "
+                    f"decision={decision_label}"
+                )
+                if result.participants:
+                    print(
+                        f"           participants={result.participants}, "
+                        f"winner={result.winner}"
+                    )
+                print(f"           reason: {result.reason}")
 
 
 def _run_headless(

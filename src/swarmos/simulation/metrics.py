@@ -8,6 +8,9 @@ Phase 3 additions:
     - Per-robot wait ticks
     - Aggregate wait ticks and movement counts
     - Policy name tracking
+
+Phase 6 additions:
+    - Negotiation metrics (negotiations, proceed/wait decisions)
 """
 
 from __future__ import annotations
@@ -57,6 +60,9 @@ class SimulationMetrics:
     total_wait_ticks: int = 0
     total_movements: int = 0
     policy_name: str = ""
+    negotiations_completed: int = 0
+    proceed_decisions: int = 0
+    wait_decisions: int = 0
     collisions: list[Collision] = field(default_factory=list)
     path_conflicts: list[Conflict] = field(default_factory=list)
     per_robot: dict[str, RobotMetrics] = field(default_factory=dict)
@@ -111,6 +117,14 @@ class SimulationMetrics:
         """Update the total tick count."""
         self.total_ticks = ticks
 
+    def record_negotiation(self, proceed: bool) -> None:
+        """Record a completed negotiation decision."""
+        self.negotiations_completed += 1
+        if proceed:
+            self.proceed_decisions += 1
+        else:
+            self.wait_decisions += 1
+
     # ------------------------------------------------------------------
     # Reporting
     # ------------------------------------------------------------------
@@ -130,6 +144,12 @@ class SimulationMetrics:
             f"  Path conflicts:       {self.total_path_conflicts}",
             f"  Runtime collisions:   {self.total_collisions}",
         ])
+        if self.negotiations_completed > 0:
+            lines.extend([
+                f"  Negotiations:         {self.negotiations_completed}",
+                f"  Proceed decisions:    {self.proceed_decisions}",
+                f"  Wait decisions:       {self.wait_decisions}",
+            ])
         for rm in self.per_robot.values():
             status = f"arrived at tick {rm.completion_tick}" if rm.completed else "in progress"
             lines.append(
